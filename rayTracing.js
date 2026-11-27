@@ -1,7 +1,8 @@
 const rayTracer = `#version 300 es
     precision highp float;
     precision highp int;
-    const vec3 LIGHT = vec3(3.0, 4.0, 5.0);
+    // Elevated daylight illuminates the upper stories as well as the streets.
+    const vec3 LIGHT = vec3(-400.0, 650.0, 350.0);
     const int MAX_BOUNCES = 6;
     const float GLASS_IOR = 1.5;
     const float SCHLICK_THRESHOLD = 0.01;
@@ -172,11 +173,13 @@ const rayTracer = `#version 300 es
     ${PLANE}
     ${SURFACE}
     ${BUILDING.shader}
+    ${CITY.shader}
 
     HitData traceScene(Ray ray) {
         HitData hit = intersectPlane(ray, planePos, planeRot);
-        intersectSurface(ray, hit);
+        intersectCity(ray, hit);
         intersectBuildings(ray, hit);
+        intersectSurface(ray, hit);
         return hit;
     }
 

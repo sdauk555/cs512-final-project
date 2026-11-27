@@ -3,7 +3,9 @@ const STREET = (() => {
     const EAST = 2;
     const SOUTH = 4;
     const WEST = 8;
-    const CELLS_PER_TILE = 5;
+    // Nine asphalt cells leave room for the plane's 3.4-unit wingspan,
+    // with one sidewalk cell on each side.
+    const CELLS_PER_TILE = 11;
     const CELL_SIZE = 0.5;
     const TILE_SIZE = CELLS_PER_TILE * CELL_SIZE;
     const MATERIAL = Object.freeze({ grass: 0, asphalt: 1, concrete: 2, stripeX: 3, stripeZ: 4 });

@@ -9,12 +9,39 @@
 </head>
 <body>
   <canvas id="c"></canvas>
+  <script src="plane.js"></script>
+  <script src="rayTracing.js"></script>
   <script>
     const canvas = document.getElementById("c");
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
     const gl = canvas.getContext("webgl2");
     gl.viewport(0, 0, canvas.width, canvas.height);
+
+    function loadTexture(gl, url, unit, onLoad) {
+      const tex = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([180, 180, 180, 255]));
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+      const img = new Image();
+      img.onload = () => {
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        if (onLoad) onLoad();
+      };
+
+      img.onerror = () => console.error('Failed to load texture:', url);
+      img.src = url;
+      return tex;
+    }
 
     const vsSource = `#version 300 es
     in vec2 aPosition;
@@ -24,256 +51,73 @@
       gl_Position = vec4(aPosition, 0.0, 1.0);
     }`;
 
-    const fsSource = `#version 300 es
-    precision highp float;
+    const fsSource = rayTracer + `
     in vec2 vPos;
     uniform float uAspect;
     uniform vec2 uCameraOrbit;
     out vec4 fragColor;
-    const vec3 LIGHT = vec3(3.0, 4.0, 5.0);
-    const int MAX_BOUNCES = 4;
-    const float GLASS_IOR = 1.5;
-    const float SCHLICK_THRESHOLD = 0.5;
-    struct Ray { vec3 origin; vec3 direction; };
-    struct HitData {
-      bool hit; float t; vec3 point; vec3 normal; vec3 color;
-      float reflectivity;
-      bool isGlass;
-    };
-
-    bool intersectBox(Ray ray, vec3 center, vec3 halfExtents, out float t, out vec3 normal) {
-      vec3 t0s = (center - halfExtents - ray.origin) / ray.direction;
-      vec3 t1s = (center + halfExtents - ray.origin) / ray.direction;
-      vec3 tmin = min(t0s, t1s);
-      vec3 tmax = max(t0s, t1s);
-      float t0 = max(max(tmin.x, tmin.y), tmin.z);
-      float t1 = min(min(tmax.x, tmax.y), tmax.z);
-      if (t1 < 0.0 || t0 > t1) return false;
-      t = t0 > 0.001 ? t0 : t1;
-      if (t < 0.001) return false;
-      vec3 local = (ray.origin + ray.direction * t - center) / halfExtents;
-      vec3 a = abs(local);
-      if (a.x > a.y && a.x > a.z) normal = vec3(sign(local.x), 0.0, 0.0);
-      else if (a.y > a.z) normal = vec3(0.0, sign(local.y), 0.0);
-      else normal = vec3(0.0, 0.0, sign(local.z));
-      return true;
-    }
-
-    bool intersectSphere(Ray ray, vec3 center, float radius, out float t, out vec3 normal) {
-      vec3 oc = ray.origin - center;
-      float b = dot(oc, ray.direction);
-      float d = b * b - dot(oc, oc) + radius * radius;
-      if (d < 0.0) return false;
-      t = -b - sqrt(d);
-      if (t < 0.001) t = -b + sqrt(d);
-      if (t < 0.001) return false;
-      normal = (ray.origin + ray.direction * t - center) / radius;
-      return true;
-    }
-
-    bool intersectCylinder(Ray ray, vec3 center, float radius, float halfHeight, out float t, out vec3 normal) {
-      vec3 o = ray.origin - center;
-      vec3 d = ray.direction;
-      float best = 1e10;
-      float a = dot(d.xz, d.xz);
-      float b = dot(o.xz, d.xz);
-      float c = dot(o.xz, o.xz) - radius * radius;
-      float disc = b * b - a * c;
-      if (a > 1e-6 && disc >= 0.0) {
-        float s = sqrt(disc);
-        for (int i = 0; i < 2; i++) {
-          float ts = (-b + (i == 0 ? -s : s)) / a;
-          float y = o.y + ts * d.y;
-          if (ts > 0.001 && ts < best && abs(y) <= halfHeight) {
-            best = ts;
-            vec3 p = o + ts * d;
-            normal = normalize(vec3(p.x, 0.0, p.z));
-          }
-        }
-      }
-
-      if (abs(d.y) > 1e-6) {
-        for (int i = 0; i < 2; i++) {
-          float sgn = (i == 0) ? -1.0 : 1.0;
-          float tc = (sgn * halfHeight - o.y) / d.y;
-          vec2 p = o.xz + tc * d.xz;
-          if (tc > 0.001 && tc < best && dot(p, p) <= radius * radius) {
-            best = tc;
-            normal = vec3(0.0, sgn, 0.0);
-          }
-        }
-      }
-
-      if (best > 1e9) return false;
-      t = best;
-      return true;
-    }
-
-    bool intersectCone(Ray ray, vec3 center, float radius, float halfHeight, out float t, out vec3 normal) {
-      vec3 o = ray.origin - center;
-      vec3 d = ray.direction;
-      float best = 1e10;
-      float k = radius / (2.0 * halfHeight);
-      float k2 = k * k;
-      float q = halfHeight - o.y;
-      float a = dot(d.xz, d.xz) - k2 * d.y * d.y;
-      float b = dot(o.xz, d.xz) + k2 * q * d.y;
-      float c = dot(o.xz, o.xz) - k2 * q * q;
-      float disc = b * b - a * c;
-      if (abs(a) > 1e-6 && disc >= 0.0) {
-        float s = sqrt(disc);
-        for (int i = 0; i < 2; i++) {
-          float ts = (-b + (i == 0 ? -s : s)) / a;
-          float y = o.y + ts * d.y;
-          if (ts > 0.001 && ts < best && y >= -halfHeight && y <= halfHeight) {
-            best = ts;
-            vec3 p = o + ts * d;
-            normal = normalize(vec3(p.x, k2 * (halfHeight - p.y), p.z));
-          }
-        }
-      }
-
-      if (abs(d.y) > 1e-6) {
-        float tc = (-halfHeight - o.y) / d.y;
-        vec2 p = o.xz + tc * d.xz;
-        if (tc > 0.001 && tc < best && dot(p, p) <= radius * radius) {
-          best = tc;
-          normal = vec3(0.0, -1.0, 0.0);
-        }
-      }
-
-      if (best > 1e9) return false;
-      t = best;
-      return true;
-    }
-
-    vec3 refraction(vec3 I, vec3 N, float eta) {
-      float cosI = -dot(I, N);
-      float k = 1.0 - eta * eta * (1.0 - cosI * cosI);
-      if (k < 0.0) return vec3(0.0);
-      float cosT = sqrt(k);
-      return eta * I + (eta * cosI - cosT) * N;
-    }
-
-    float schlick(float cosine, float ref_idx) {
-      float f0 = (1.0 - ref_idx) / (1.0 + ref_idx);
-      f0 *= f0;
-      return f0 + (1.0 - f0) * pow(1.0 - cosine, 5.0);
-    }
-
-    HitData traceScene(Ray ray) {
-      HitData hit;
-      hit.hit = false;
-      hit.t = 1e10;
-      float t;
-      vec3 n;
-
-      if (intersectBox(ray, vec3(0.0), vec3(1.0), t, n) && t < hit.t) {
-        hit = HitData(true, t, ray.origin + ray.direction * t, n, vec3(0.2, 0.6, 1.0), 0.0, false);
-      }
-
-      return hit;
-    }
-
-    vec3 trace(Ray ray) {
-      vec3 color = vec3(0.0);
-      vec3 attenuation = vec3(1.0);
-
-      for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
-        HitData hit = traceScene(ray);
-        if (!hit.hit) break;
-
-        if (hit.isGlass) {
-          vec3 N = hit.normal;
-          float n1 = 1.0, n2 = GLASS_IOR;
-          if (dot(ray.direction, N) > 0.0) {
-            N = -N;
-            n1 = GLASS_IOR; n2 = 1.0;
-          }
-
-          float eta = n1 / n2;
-          float cosI = -dot(ray.direction, N);
-          float sin2T = eta * eta * (1.0 - cosI * cosI);
-          bool total_internal_reflection = sin2T > 1.0;
-          float schlick_value = 1.0;
-          if (!total_internal_reflection) {
-            float cosT = sqrt(1.0 - sin2T);
-            float c = (n1 > n2) ? cosT : cosI;
-            schlick_value = schlick(c, n2 / n1);
-          }
-
-          vec3 direction;
-          if (total_internal_reflection || schlick_value > SCHLICK_THRESHOLD) {
-            direction = reflect(ray.direction, N);
-          } else {
-            direction = refraction(ray.direction, N, eta);
-          }
-
-          ray = Ray(hit.point + direction * 0.001, direction);
-          attenuation *= hit.color;
-          continue;
-        }
-
-        vec3 toLight = LIGHT - hit.point;
-        float dist = length(toLight);
-        vec3 L = toLight / dist;
-        HitData blocker = traceScene(Ray(hit.point + hit.normal * 0.001, L));
-        float visible = (blocker.hit && blocker.t < dist) ? 0.0 : 1.0;
-        float diff = max(dot(hit.normal, L), 0.0) * visible;
-        vec3 shading = hit.color * (0.2 + 0.8 * diff);
-        color += attenuation * shading * (1.0 - hit.reflectivity);
-        if (hit.reflectivity == 0.0) break;
-        attenuation *= hit.reflectivity;
-        ray = Ray(hit.point + hit.normal * 0.001, reflect(ray.direction, hit.normal));
-      }
-
-      return color;
-    }
 
     void main() {
-      float cp = cos(uCameraOrbit.x);
-      float sp = sin(uCameraOrbit.x);
-      float cy = cos(uCameraOrbit.y);
-      float sy = sin(uCameraOrbit.y);
-      mat3 rotX = mat3(1.0, 0.0, 0.0, 0.0, cp, -sp, 0.0, sp, cp);
-      mat3 rotY = mat3(cy, 0.0, -sy, 0.0, 1.0, 0.0, sy, 0.0, cy);
-      mat3 camera = rotY * rotX;
+        float cp = cos(uCameraOrbit.x);
+        float sp = sin(uCameraOrbit.x);
+        float cy = cos(uCameraOrbit.y);
+        float sy = sin(uCameraOrbit.y);
+        mat3 rotX = mat3(1.0, 0.0, 0.0, 0.0, cp, -sp, 0.0, sp, cp);
+        mat3 rotY = mat3(cy, 0.0, -sy, 0.0, 1.0, 0.0, sy, 0.0, cy);
+        mat3 camera = rotY * rotX;
 
-      float f = 2.4142;
-      vec3 target = vec3(0.0);
-      vec3 origin = target + camera * vec3(0.0, 0.0, 6.0);
-      vec3 dir = camera * normalize(vec3(vPos.x * uAspect, vPos.y, -f));
-      fragColor = vec4(trace(Ray(origin, dir)), 1.0);
-    }`;
+        float f = 2.4142;
+        vec3 target = vec3(0.0);
+        vec3 origin = target + camera * vec3(0.0, 0.0, 6.0);
+        vec3 dir = camera * normalize(vec3(vPos.x * uAspect, vPos.y, -f));
+        fragColor = vec4(trace(Ray(origin, dir)), 1.0);
+    }`;    
 
     const prog = gl.createProgram();
     for (const [type, src] of [[gl.VERTEX_SHADER, vsSource], [gl.FRAGMENT_SHADER, fsSource]]) {
       const s = gl.createShader(type);
       gl.shaderSource(s, src);
       gl.compileShader(s);
+
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(s));
+      }
+
       gl.attachShader(prog, s);
     }
 
     gl.linkProgram(prog);
     gl.useProgram(prog);
+    loadTexture(gl, 'planeMetal/planeMetal_Color.png', 0, render);
+    loadTexture(gl, 'planeMetal/planeMetal_Displacement.png', 1, render);
+    gl.uniform1i(gl.getUniformLocation(prog, 'planeTex'), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, 'planeBump'), 1);
     const positions = new Float32Array([-1,-1,  1,-1,  -1,1,  1,1]);
     gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
     const loc = gl.getAttribLocation(prog, "aPosition");
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    const planePosLoc = gl.getUniformLocation(prog, "planePos");
+    const planeRotLoc = gl.getUniformLocation(prog, "planeRot");
     const aspectLoc = gl.getUniformLocation(prog, "uAspect");
     const orbitLoc = gl.getUniformLocation(prog, "uCameraOrbit");
     let pitch = 0.5, yaw = -0.6;
+
     function render() {
       gl.uniform1f(aspectLoc, canvas.width / canvas.height);
       gl.uniform2f(orbitLoc, pitch, yaw);
+      gl.uniform3f(planePosLoc, 0, 0, 0);
+      gl.uniformMatrix3fv(planeRotLoc, false, [1, 0, 0, 0, 1, 0, 0, 0, 1]);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
     canvas.addEventListener("pointerdown", e => canvas.setPointerCapture(e.pointerId));
     canvas.addEventListener("pointermove", e => {
-      if (!canvas.hasPointerCapture(e.pointerId)) return;
+      if (!canvas.hasPointerCapture(e.pointerId)) {
+        return;
+      }
+
       yaw -= e.movementX * 0.01;
       pitch = Math.min(1.4, Math.max(-0.2, pitch + e.movementY * 0.01));
       render();

@@ -73,6 +73,7 @@ HitData intersectPlane(Ray ray, vec3 pos, mat3 rot) {
     best.normal = vec3(0.0, 1.0, 0.0);
     best.color = vec3(0.0);
     best.reflectivity = 0.0;
+    best.specular = 0.9;
     best.isGlass = false;
 
     mat3 inv = transpose(rot);

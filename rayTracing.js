@@ -1,11 +1,12 @@
 const rayTracer = `#version 300 es
     precision highp float;
-    const vec3 LIGHT = vec3(3.0, 4.0, 5.0);
-    const int MAX_BOUNCES = 4;
+    precision highp int;
+    // Elevated daylight illuminates the upper stories as well as the streets.
+    const vec3 LIGHT = vec3(-400.0, 650.0, 350.0);
+    const int MAX_BOUNCES = 6;
     const float GLASS_IOR = 1.5;
     const float SCHLICK_THRESHOLD = 0.01;
     const float SHININESS = 64.0;
-    const float SPEC_STR = 0.9;
 
     struct Ray {
         vec3 origin;
@@ -19,6 +20,7 @@ const rayTracer = `#version 300 es
         vec3 normal;
         vec3 color;
         float reflectivity;
+        float specular;
         bool isGlass;
     };
 
@@ -169,19 +171,15 @@ const rayTracer = `#version 300 es
     }
 
     ${PLANE}
+    ${SURFACE}
+    ${BUILDING.shader}
+    ${CITY.shader}
 
     HitData traceScene(Ray ray) {
-        HitData hit;
-        hit.hit = false;
-        hit.t = 1e10;
-        float t;
-        vec3 n;
-
-        HitData planeHit = intersectPlane(ray, planePos, planeRot);
-        if (planeHit.hit && planeHit.t < hit.t) {
-            hit = planeHit;
-        }
-
+        HitData hit = intersectPlane(ray, planePos, planeRot);
+        intersectCity(ray, hit);
+        intersectBuildings(ray, hit);
+        intersectSurface(ray, hit);
         return hit;
     }
 
@@ -201,12 +199,26 @@ const rayTracer = `#version 300 es
     vec3 trace(Ray ray) {
         vec3 color = vec3(0.0);
         vec3 attenuation = vec3(1.0);
+        Ray pendingRays[MAX_BOUNCES];
+        vec3 pendingWeights[MAX_BOUNCES];
+        int pendingDepths[MAX_BOUNCES];
+        int pending = 0;
+        int depth = 0;
 
-        for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+        for (int step = 0; step < 48; step++) {
+            if (depth >= MAX_BOUNCES || max(attenuation.r, max(attenuation.g, attenuation.b)) < 0.01) {
+                if (pending == 0) break;
+                pending--;
+                ray = pendingRays[pending];
+                attenuation = pendingWeights[pending];
+                depth = pendingDepths[pending];
+            }
             HitData hit = traceScene(ray);
+            depth++;
             if (!hit.hit) {
                 color += attenuation * skyColor(ray.direction);
-                break;
+                depth = MAX_BOUNCES;
+                continue;
             }
 
             if (hit.isGlass) {
@@ -229,9 +241,17 @@ const rayTracer = `#version 300 es
                 }
 
                 vec3 direction;
-                if (total_internal_reflection || schlick_value > SCHLICK_THRESHOLD) {
+                if (total_internal_reflection) {
                     direction = reflect(ray.direction, N);
                 } else {
+                    if (schlick_value > SCHLICK_THRESHOLD && pending < MAX_BOUNCES && depth < MAX_BOUNCES) {
+                        vec3 reflected = reflect(ray.direction, N);
+                        pendingRays[pending] = Ray(hit.point + reflected * 0.001, reflected);
+                        pendingWeights[pending] = attenuation * schlick_value;
+                        pendingDepths[pending] = depth;
+                        pending++;
+                    }
+                    attenuation *= 1.0 - schlick_value;
                     direction = refraction(ray.direction, N, eta);
                 }
 
@@ -243,16 +263,27 @@ const rayTracer = `#version 300 es
             vec3 toLight = LIGHT - hit.point;
             float dist = length(toLight);
             vec3 L = toLight / dist;
-            HitData blocker = traceScene(Ray(hit.point + hit.normal * 0.001, L));
-            float visible = (blocker.hit && blocker.t < dist) ? 0.0 : 1.0;
+            Ray shadow = Ray(hit.point + hit.normal * 0.001, L);
+            float visible = 1.0;
+            float remaining = dist;
+            for (int pane = 0; pane < 10; pane++) {
+                HitData blocker = traceScene(shadow);
+                if (!blocker.hit || blocker.t >= remaining) break;
+                if (!blocker.isGlass) { visible = 0.0; break; }
+                visible *= 0.96;
+                remaining -= blocker.t + 0.001;
+                shadow.origin = blocker.point + L * 0.001;
+                if (pane == 9) visible = 0.0;
+            }
             float diff = max(dot(hit.normal, L), 0.0) * visible;
             vec3 V = -ray.direction;
             vec3 R = reflect(-L, hit.normal);
             float spec = pow(max(dot(R, V), 0.0), SHININESS) * visible;
-            vec3 shading = hit.color * (0.2 + 0.8 * diff) + vec3(SPEC_STR * spec);
+            vec3 shading = hit.color * (0.2 + 0.8 * diff) + vec3(hit.specular * spec);
             color += attenuation * shading * (1.0 - hit.reflectivity);
             if (hit.reflectivity == 0.0) {
-                break;
+                depth = MAX_BOUNCES;
+                continue;
             }
 
             attenuation *= hit.reflectivity * hit.color;
